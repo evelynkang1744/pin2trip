@@ -16,14 +16,30 @@ st.set_page_config(
 st.title("✈️ 社畜截圖轉行程 AI 助手")
 st.caption("自動萃取社群截圖中的景點、最佳順路動線排序與一鍵導航！")
 
-# ----------------- 取得 API KEY -----------------
-api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
+# ----------------- 取得 API KEY (Secrets 優先，支援手動側邊欄備用) -----------------
+# 從 Secrets 或環境變數取得金鑰，並去除頭尾空格與多餘引號
+raw_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+clean_key = (
+    str(raw_key).strip().strip('"').strip("'")
+    if raw_key
+    else ""
+)
 
-if not api_key:
-  st.error("❌ 找不到 GEMINI_API_KEY！請至 App Settings -> Secrets 設定。")
+st.sidebar.header("🔑 API 金鑰設定")
+user_key = st.sidebar.text_input(
+    "Gemini API Key",
+    value=clean_key,
+    type="password",
+    help="若已在 Secrets 設定則會自動帶入，亦可在此直接貼上覆蓋。",
+)
+
+if not user_key:
+  st.warning("👈 請在左側側邊欄輸入有效的 Gemini API Key 才能開始辨識！")
   st.stop()
 
-client = genai.Client(api_key=api_key)
+# 確保同時寫入環境變數與 SDK Client
+os.environ["GEMINI_API_KEY"] = user_key
+client = genai.Client(api_key=user_key)
 
 
 # ----------------- 輔助函式：路徑智慧排序 -----------------
