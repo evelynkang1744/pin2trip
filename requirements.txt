@@ -1,0 +1,7 @@
+Plaintext
+streamlit
+streamlit-folium
+folium
+google-genai
+pillow
+geopy
