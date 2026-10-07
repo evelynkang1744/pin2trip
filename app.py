@@ -4,8 +4,7 @@ import urllib.parse
 from PIL import Image
 import folium
 from geopy.distance import geodesic
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -16,8 +15,7 @@ st.set_page_config(
 st.title("✈️ 社畜截圖轉行程 AI 助手")
 st.caption("自動萃取社群截圖中的景點、最佳順路動線排序與一鍵導航！")
 
-# ----------------- 取得 API KEY (Secrets 優先，支援手動側邊欄備用) -----------------
-# 從 Secrets 或環境變數取得金鑰，並去除頭尾空格與多餘引號
+# ----------------- 取得 API KEY (Secrets 優先，支援側邊欄手動輸入) -----------------
 raw_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 clean_key = (
     str(raw_key).strip().strip('"').strip("'")
@@ -25,7 +23,6 @@ clean_key = (
     else ""
 )
 
-# ----------------- 側邊欄金鑰驗證 -----------------
 st.sidebar.header("🔑 API 金鑰設定")
 user_key = st.sidebar.text_input(
     "Gemini API Key",
@@ -34,17 +31,15 @@ user_key = st.sidebar.text_input(
     help="若已在 Secrets 設定則會自動帶入，亦可在此直接貼上覆蓋。",
 )
 
-# 加上一個快速驗證按鈕
+# 快速連線測試按鈕
 if st.sidebar.button("🔍 測試 Key 連線狀態"):
   if not user_key:
     st.sidebar.error("請先輸入 API Key！")
   else:
     try:
-      test_client = genai.Client(api_key=user_key)
-      test_res = test_client.models.generate_content(
-          model="gemini-flash-lite-latest",
-          contents="Hello",
-      )
+      genai.configure(api_key=user_key)
+      test_model = genai.GenerativeModel("gemini-3.8-flash")
+      test_res = test_model.generate_content("Hello")
       st.sidebar.success("✅ 連線成功！API Key 正常運作中。")
     except Exception as e:
       st.sidebar.error(f"❌ 連線失敗：{e}")
@@ -53,9 +48,8 @@ if not user_key:
   st.warning("👈 請在左側側邊欄輸入有效的 Gemini API Key 才能開始辨識！")
   st.stop()
 
-# 確保同時寫入環境變數與 SDK Client
-os.environ["GEMINI_API_KEY"] = user_key
-client = genai.Client(api_key=user_key)
+# 全域配置金鑰
+genai.configure(api_key=user_key)
 
 
 # ----------------- 輔助函式：路徑智慧排序 -----------------
@@ -114,7 +108,7 @@ def generate_google_maps_directions_url(places_list):
   return url
 
 
-# ----------------- 側邊欄 -----------------
+# ----------------- 側邊欄上傳 -----------------
 st.sidebar.header("📸 上傳旅遊截圖")
 uploaded_files = st.sidebar.file_uploader(
     "支援多張 JPG / PNG 截圖上傳",
@@ -126,7 +120,7 @@ start_button = st.sidebar.button(
 )
 
 
-# ----------------- 核心解析函式（帶詳細錯誤反饋） -----------------
+# ----------------- 核心解析函式 -----------------
 def analyze_image(image_bytes):
   image = Image.open(image_bytes)
   prompt = """
@@ -144,35 +138,28 @@ def analyze_image(image_bytes):
       }
     ]
     """
-  models_to_try = [
-      "gemini-flash-lite-latest",
-      "gemini-3.5-flash-lite",
-      "gemini-flash-latest",
-      "gemini-3.8-flash",
-  ]
 
+  # 支援多模型備援
+  candidate_models = ["gemini-3.8-flash", "gemini-flash-latest"]
   errors = []
-  for model_name in models_to_try:
+
+  for model_name in candidate_models:
     try:
-      response = client.models.generate_content(
-          model=model_name,
-          contents=[image, prompt],
-          config=types.GenerateContentConfig(
-              response_mime_type="application/json",
-              temperature=0.2,
-          ),
+      model = genai.GenerativeModel(
+          model_name=model_name,
+          generation_config={"response_mime_type": "application/json"},
       )
+      response = model.generate_content([image, prompt])
       return json.loads(response.text)
     except Exception as e:
-      errors.append(f"{model_name}: {str(e)}")
+      errors.append(f"{model_name}: {e}")
       continue
 
-  # 如果所有模型都連不上，將真實錯誤直接貼在畫面上
-  st.error(f"辨識失敗，詳細錯誤日誌：\n" + "\n".join(errors))
+  st.error(f"辨識失敗：\n" + "\n".join(errors))
   return []
 
 
-# ----------------- 執行分析 -----------------
+# ----------------- 點擊按鈕執行分析 -----------------
 if start_button:
   if not uploaded_files:
     st.sidebar.warning("請先上傳至少一張截圖！")
@@ -194,7 +181,7 @@ if start_button:
       status_text.text("✅ 分析完成！")
       st.session_state["places"] = all_places
     else:
-      status_text.text("⚠️ 未能萃取出景點，請檢查上方錯誤提示。")
+      status_text.text("⚠️ 未能萃取出景點，請檢查錯誤日誌。")
 
 # ----------------- 畫面展示區 -----------------
 if "places" in st.session_state and st.session_state["places"]:
@@ -271,3 +258,4 @@ if "places" in st.session_state and st.session_state["places"]:
       st_folium(m, width="100%", height=550)
     else:
       st.warning("未能取得有效經緯度座標。")
+    
