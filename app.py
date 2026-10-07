@@ -25,6 +25,7 @@ clean_key = (
     else ""
 )
 
+# ----------------- 側邊欄金鑰驗證 -----------------
 st.sidebar.header("🔑 API 金鑰設定")
 user_key = st.sidebar.text_input(
     "Gemini API Key",
@@ -32,6 +33,21 @@ user_key = st.sidebar.text_input(
     type="password",
     help="若已在 Secrets 設定則會自動帶入，亦可在此直接貼上覆蓋。",
 )
+
+# 加上一個快速驗證按鈕
+if st.sidebar.button("🔍 測試 Key 連線狀態"):
+  if not user_key:
+    st.sidebar.error("請先輸入 API Key！")
+  else:
+    try:
+      test_client = genai.Client(api_key=user_key)
+      test_res = test_client.models.generate_content(
+          model="gemini-flash-lite-latest",
+          contents="Hello",
+      )
+      st.sidebar.success("✅ 連線成功！API Key 正常運作中。")
+    except Exception as e:
+      st.sidebar.error(f"❌ 連線失敗：{e}")
 
 if not user_key:
   st.warning("👈 請在左側側邊欄輸入有效的 Gemini API Key 才能開始辨識！")
