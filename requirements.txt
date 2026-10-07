@@ -1,7 +1,5 @@
-Plaintext
-streamlit
-streamlit-folium
-folium
 google-genai
-pillow
+Pillow
+folium
+streamlit-folium
 geopy
