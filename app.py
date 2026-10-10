@@ -13,8 +13,9 @@ from streamlit_folium import st_folium
 st.set_page_config(
     page_title="截圖轉行程 Travel Pin-to-Itinerary", layout="wide"
 )
-st.title("✈️ 社畜截圖轉行程 AI 助手")
-st.caption("自動萃取社群截圖中的景點、最佳順路動線排序與一鍵導航！")
+st.title("✈️ 上班截圖、下班出發：社畜無腦排行程 AI")
+st.caption("IG、小紅書截圖一鍵丟！自動抓出神秘景點，排好順路動線直接導航出發！！")
+st.caption("只要會截圖，剩下的交給 AI！")
 
 # ----------------- 側邊欄：API 金鑰設定 -----------------
 st.sidebar.header("🔑 使用者設定")
