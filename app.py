@@ -274,4 +274,55 @@ if "places" in st.session_state and st.session_state["places"]:
         st.markdown(f"### 第 {i} 站：{p.get('name', '未知地點')}")
         st.write(
             f"🏷️ **類別**：{p.get('category', '景點')} ｜ 🏙️"
-            f"
+            f" **城市**：{p.get('city', '')}"
+        )
+        st.write(f"💡 **推薦看點/必吃**：{p.get('must_try_or_see', '無')}")
+
+        # 使用店名 + 城市組成的精確搜尋連結
+        search_text = f"{p.get('name', '')} {p.get('city', '')}".strip()
+        single_map_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(search_text)}"
+        st.markdown(f"[🔍 單獨查看此地點資訊]({single_map_url})")
+
+  # 右欄：Folium 互動地圖
+  with col2:
+    st.subheader("🗺️ 最佳順序動線地圖")
+    valid_coords = [
+        (p.get("lat"), p.get("lon"))
+        for p in places
+        if p.get("lat") and p.get("lon")
+    ]
+
+    if valid_coords:
+      start_lat, start_lon = valid_coords[0]
+      m = folium.Map(location=[start_lat, start_lon], zoom_start=13)
+
+      for i, p in enumerate(places, 1):
+        lat, lon = p.get("lat"), p.get("lon")
+        if lat and lon:
+          popup_content = (
+              f"<b>第 {i} 站：{p.get('name')}</b><br>{p.get('must_try_or_see')}"
+          )
+          folium.Marker(
+              location=[lat, lon],
+              tooltip=f"第 {i} 站：{p.get('name')}",
+              popup=folium.Popup(popup_content, max_width=250),
+              icon=folium.Icon(color="blue", icon="bookmark", prefix="fa"),
+          ).add_to(m)
+
+      if len(valid_coords) > 1:
+        folium.PolyLine(
+            locations=valid_coords,
+            color="#2563EB",
+            weight=4,
+            opacity=0.8,
+            dash_array="6, 8",
+        ).add_to(m)
+
+      st_folium(m, width="100%", height=550)
+    else:
+      st.warning("未能取得有效經緯度座標。")
+
+elif not uploaded_files:
+  st.info(
+      "👈 請在左側面板上傳 1~3 張旅遊截圖，並點擊「開始辨識並規劃行程」。"
+  )
