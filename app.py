@@ -24,15 +24,17 @@ st.sidebar.markdown(
     "[👉 點此免費取得 Gemini API Key](https://aistudio.google.com/app/apikey)"
 )
 
-# 從 Secrets 或環境變數讀取預設值（若有的話）
-raw_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-clean_default = (
-    str(raw_key).strip().strip('"').strip("'") if raw_key else ""
+# ----------------- 側邊欄：API 金鑰設定 -----------------
+st.sidebar.header("🔑 使用者設定")
+st.sidebar.markdown(
+    "本工具使用您個人的 Google Gemini 額度。\n"
+    "[👉 點此免費取得 Gemini API Key](https://aistudio.google.com/app/apikey)"
 )
 
+# 預設完全清空，由使用者手動輸入
 user_key = st.sidebar.text_input(
     "請輸入您的 Gemini API Key",
-    value=clean_default,
+    value="",
     type="password",
     placeholder="AIzaSy...",
     help="金鑰僅供本次瀏覽階段使用，不會儲存於伺服器。",
