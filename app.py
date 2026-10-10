@@ -16,13 +16,14 @@ st.set_page_config(
 st.title("✈️ 社畜截圖轉行程 AI 助手")
 st.caption("自動萃取社群截圖中的景點、最佳順路動線排序與一鍵導航！")
 
-# ----------------- 側邊欄：使用者設定 API KEY -----------------
+# ----------------- 側邊欄：API 金鑰設定 -----------------
 st.sidebar.header("🔑 使用者設定")
 st.sidebar.markdown(
     "本工具使用您個人的 Google Gemini 額度。\n"
     "[👉 點此免費取得 Gemini API Key](https://aistudio.google.com/app/apikey)"
 )
 
+# 從 Secrets 或環境變數讀取預設值（若有的話）
 raw_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 clean_default = (
     str(raw_key).strip().strip('"').strip("'") if raw_key else ""
@@ -36,52 +37,39 @@ user_key = st.sidebar.text_input(
     help="金鑰僅供本次瀏覽階段使用，不會儲存於伺服器。",
 )
 
-# ----------------- REST API 呼叫輔助函式 -----------------
-def call_gemini_api(api_key, prompt, image_bytes, mime_type="image/jpeg"):
-  # 將原本的 gemini-2.5-flash 改為 gemini-3.8-flash
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
+# 備援模型清單（優先使用輕量、排隊較少的模型繞開 503 尖峰）
+MODELS_TO_TRY = [
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-3.8-flash",
+]
 
-  encoded_image = base64.b64encode(image_bytes).decode("utf-8")
-
-  payload = {
-      "contents": [{
-          "parts": [
-              {"text": prompt},
-              {
-                  "inline_data": {
-                      "mime_type": mime_type,
-                      "data": encoded_image,
-                  }
-              },
-          ]
-      }],
-      "generationConfig": {
-          "response_mime_type": "application/json",
-          "temperature": 0.2,
-      },
-  }
-
-  headers = {"Content-Type": "application/json"}
-  response = requests.post(url, headers=headers, json=payload, timeout=30)
-  return response
-
-
-# ----------------- 快速連線測試按鈕 -----------------
+# 側邊欄：快速連線測試按鈕
 if st.sidebar.button("🔍 測試 Key 連線狀態"):
   if not user_key:
     st.sidebar.error("請先輸入 API Key！")
   else:
     key = user_key.strip().strip('"').strip("'")
-    test_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={key}"
-    payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
-    try:
-      res = requests.post(test_url, json=payload, timeout=10)
-      if res.status_code == 200:
-        st.sidebar.success("✅ 連線成功！API Key 正常運作中。")
-      else:
-        st.sidebar.error(f"❌ 錯誤碼 {res.status_code}：{res.text}")
-    except Exception as e:
-      st.sidebar.error(f"❌ 網路連線異常：{e}")
+    success = False
+    last_msg = ""
+
+    for model_name in MODELS_TO_TRY:
+      test_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+      payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
+      try:
+        res = requests.post(test_url, json=payload, timeout=10)
+        if res.status_code == 200:
+          st.sidebar.success(f"✅ 連線成功！當前可用模型：{model_name}")
+          success = True
+          break
+        else:
+          last_msg = f"{model_name} ({res.status_code}): {res.text}"
+      except Exception as e:
+        last_msg = f"{model_name}: {e}"
+
+    if not success:
+      st.sidebar.error(f"❌ 全部模型連線失敗，最後錯誤：{last_msg}")
 
 if not user_key:
   st.info("👈 請在左側輸入您的 Gemini API Key 即可開始使用。")
@@ -89,8 +77,10 @@ if not user_key:
 
 clean_api_key = user_key.strip().strip('"').strip("'")
 
-# ----------------- 輔助函式：路徑智慧排序 -----------------
+
+# ----------------- 輔助函式：路徑智慧排序 (TSP 貪婪演算法) -----------------
 def optimize_route(places_list):
+  """依據地理距離排序，以第一個景點為起點，每次挑選距離最近的下一個點。"""
   valid_places = [
       p
       for p in places_list
@@ -120,7 +110,9 @@ def optimize_route(places_list):
   return optimized + no_coords
 
 
+# ----------------- 輔助函式：生成 Google Maps 多點導航連結 -----------------
 def generate_google_maps_directions_url(places_list):
+  """生成串聯所有景點的 Google Maps 導航 URL。"""
   valid_places = [
       p for p in places_list if p.get("name") and p.get("lat") and p.get("lon")
   ]
@@ -142,10 +134,12 @@ def generate_google_maps_directions_url(places_list):
     url = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&waypoints={waypoints}&travelmode=walking"
   else:
     url = f"https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode=walking"
+
   return url
 
 
-# ----------------- 側邊欄上傳 -----------------
+# ----------------- 側邊欄：上傳與觸發按鈕 -----------------
+st.sidebar.markdown("---")
 st.sidebar.header("📸 上傳旅遊截圖")
 uploaded_files = st.sidebar.file_uploader(
     "支援多張 JPG / PNG 截圖上傳",
@@ -156,10 +150,14 @@ start_button = st.sidebar.button(
     "🚀 開始辨識並規劃行程", type="primary", use_container_width=True
 )
 
-# ----------------- 核心解析函式 -----------------
+
+# ----------------- 核心解析函式（多模型動態備援 REST 呼叫） -----------------
 def analyze_image(file_obj):
   image_bytes = file_obj.getvalue()
-  mime_type = "image/png" if file_obj.name.lower().endswith(".png") else "image/jpeg"
+  mime_type = (
+      "image/png" if file_obj.name.lower().endswith(".png") else "image/jpeg"
+  )
+  encoded_image = base64.b64encode(image_bytes).decode("utf-8")
 
   prompt = """
     你是一個專業的旅遊行程規劃助手。請分析使用者上傳的這張旅遊/美食/景點截圖，並提取出核心的地點資訊。
@@ -177,19 +175,45 @@ def analyze_image(file_obj):
     ]
     """
 
-  res = call_gemini_api(clean_api_key, prompt, image_bytes, mime_type)
+  payload = {
+      "contents": [{
+          "parts": [
+              {"text": prompt},
+              {
+                  "inline_data": {
+                      "mime_type": mime_type,
+                      "data": encoded_image,
+                  }
+              },
+          ]
+      }],
+      "generationConfig": {
+          "response_mime_type": "application/json",
+          "temperature": 0.2,
+      },
+  }
 
-  if res.status_code == 200:
-    data = res.json()
+  headers = {"Content-Type": "application/json"}
+  errors = []
+
+  # 遍歷模型清單，遇到 503 或錯誤自動切換下一款
+  for model_name in MODELS_TO_TRY:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_api_key}"
     try:
-      text = data["candidates"][0]["content"]["parts"][0]["text"]
-      return json.loads(text)
+      res = requests.post(url, headers=headers, json=payload, timeout=35)
+      if res.status_code == 200:
+        data = res.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text)
+      else:
+        errors.append(f"{model_name} (HTTP {res.status_code})")
+        continue
     except Exception as e:
-      st.error(f"JSON 解析失敗：{e}")
-      return []
-  else:
-    st.error(f"API 請求失敗 ({res.status_code})：{res.text}")
-    return []
+      errors.append(f"{model_name} ({e})")
+      continue
+
+  st.error("所有備援模型皆呼叫失敗：\n" + "\n".join(errors))
+  return []
 
 
 # ----------------- 點擊按鈕執行分析 -----------------
@@ -220,6 +244,7 @@ if start_button:
 if "places" in st.session_state and st.session_state["places"]:
   places = st.session_state["places"]
 
+  # 提供順路動線優化開關
   st.sidebar.markdown("---")
   st.sidebar.subheader("⚙️ 行程偏好設定")
   is_optimized = st.sidebar.checkbox(
@@ -229,9 +254,10 @@ if "places" in st.session_state and st.session_state["places"]:
   if is_optimized:
     places = optimize_route(places)
 
+  # 頂部動作列：一鍵 Google Maps 導航
   directions_url = generate_google_maps_directions_url(places)
   if directions_url:
-    st.success("💡 系統已為您安排最佳順序，點擊下方按鈕開啟完整多點導航：")
+    st.success("💡 系統已自動依地理距離為您安排最佳順序，點擊下方按鈕開啟完整多點導航：")
     st.link_button(
         "🗺️ 開啟 Google Maps 一日遊多點導航路線",
         directions_url,
@@ -240,6 +266,7 @@ if "places" in st.session_state and st.session_state["places"]:
 
   col1, col2 = st.columns([1, 1])
 
+  # 左欄：景點清單列表
   with col1:
     st.subheader(f"📍 推薦拜訪清單（共 {len(places)} 處）")
     for i, p in enumerate(places, 1):
@@ -247,47 +274,4 @@ if "places" in st.session_state and st.session_state["places"]:
         st.markdown(f"### 第 {i} 站：{p.get('name', '未知地點')}")
         st.write(
             f"🏷️ **類別**：{p.get('category', '景點')} ｜ 🏙️"
-            f" **城市**：{p.get('city', '')}"
-        )
-        st.write(f"💡 **推薦看點/必吃**：{p.get('must_try_or_see', '無')}")
-        search_text = f"{p.get('name', '')} {p.get('city', '')}".strip()
-        single_map_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(search_text)}"
-        st.markdown(f"[🔍 單獨查看此地點資訊]({single_map_url})")
-
-  with col2:
-    st.subheader("🗺️ 最佳順序動線地圖")
-    valid_coords = [
-        (p.get("lat"), p.get("lon"))
-        for p in places
-        if p.get("lat") and p.get("lon")
-    ]
-
-    if valid_coords:
-      start_lat, start_lon = valid_coords[0]
-      m = folium.Map(location=[start_lat, start_lon], zoom_start=13)
-
-      for i, p in enumerate(places, 1):
-        lat, lon = p.get("lat"), p.get("lon")
-        if lat and lon:
-          popup_content = (
-              f"<b>第 {i} 站：{p.get('name')}</b><br>{p.get('must_try_or_see')}"
-          )
-          folium.Marker(
-              location=[lat, lon],
-              tooltip=f"第 {i} 站：{p.get('name')}",
-              popup=folium.Popup(popup_content, max_width=250),
-              icon=folium.Icon(color="blue", icon="bookmark", prefix="fa"),
-          ).add_to(m)
-
-      if len(valid_coords) > 1:
-        folium.PolyLine(
-            locations=valid_coords,
-            color="#2563EB",
-            weight=4,
-            opacity=0.8,
-            dash_array="6, 8",
-        ).add_to(m)
-
-      st_folium(m, width="100%", height=550)
-    else:
-      st.warning("未能取得有效經緯度座標。")
+            f"
