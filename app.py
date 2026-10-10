@@ -1,10 +1,11 @@
+import base64
 import json
 import os
 import urllib.parse
 from PIL import Image
 import folium
 from geopy.distance import geodesic
-import google.generativeai as genai
+import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -15,30 +16,79 @@ st.set_page_config(
 st.title("✈️ 社畜截圖轉行程 AI 助手")
 st.caption("自動萃取社群截圖中的景點、最佳順路動線排序與一鍵導航！")
 
-# 側邊欄：使用者自備 API Key
+# ----------------- 側邊欄：使用者設定 API KEY -----------------
 st.sidebar.header("🔑 使用者設定")
 st.sidebar.markdown(
     "本工具使用您個人的 Google Gemini 額度。\n"
     "[👉 點此免費取得 Gemini API Key](https://aistudio.google.com/app/apikey)"
 )
 
+raw_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+clean_default = (
+    str(raw_key).strip().strip('"').strip("'") if raw_key else ""
+)
+
 user_key = st.sidebar.text_input(
     "請輸入您的 Gemini API Key",
+    value=clean_default,
     type="password",
     placeholder="AIzaSy...",
     help="金鑰僅供本次瀏覽階段使用，不會儲存於伺服器。",
 )
 
+# ----------------- REST API 呼叫輔助函式 -----------------
+def call_gemini_api(api_key, prompt, image_bytes, mime_type="image/jpeg"):
+  """直接透過 REST API 呼叫 Gemini，避免 SDK 內部 OAuth 認證錯誤"""
+  # 使用官方最新支援 API Key 的通用端點
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+
+  encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+
+  payload = {
+      "contents": [{
+          "parts": [
+              {"text": prompt},
+              {
+                  "inline_data": {
+                      "mime_type": mime_type,
+                      "data": encoded_image,
+                  }
+              },
+          ]
+      }],
+      "generationConfig": {
+          "response_mime_type": "application/json",
+          "temperature": 0.2,
+      },
+  }
+
+  headers = {"Content-Type": "application/json"}
+  response = requests.post(url, headers=headers, json=payload, timeout=30)
+  return response
+
+
+# ----------------- 快速連線測試按鈕 -----------------
+if st.sidebar.button("🔍 測試 Key 連線狀態"):
+  if not user_key:
+    st.sidebar.error("請先輸入 API Key！")
+  else:
+    key = user_key.strip().strip('"').strip("'")
+    test_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+    payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
+    try:
+      res = requests.post(test_url, json=payload, timeout=10)
+      if res.status_code == 200:
+        st.sidebar.success("✅ 連線成功！API Key 正常運作中。")
+      else:
+        st.sidebar.error(f"❌ 錯誤碼 {res.status_code}：{res.text}")
+    except Exception as e:
+      st.sidebar.error(f"❌ 網路連線異常：{e}")
+
 if not user_key:
   st.info("👈 請在左側輸入您的 Gemini API Key 即可開始使用。")
   st.stop()
 
-# 關鍵防呆：徹底清理空白與可能夾帶的引號
 clean_api_key = user_key.strip().strip('"').strip("'")
-
-# 透過明確參數傳入，避免被底層認證攔截
-genai.configure(api_key=clean_api_key)
-
 
 # ----------------- 輔助函式：路徑智慧排序 -----------------
 def optimize_route(places_list):
@@ -107,10 +157,11 @@ start_button = st.sidebar.button(
     "🚀 開始辨識並規劃行程", type="primary", use_container_width=True
 )
 
-
 # ----------------- 核心解析函式 -----------------
-def analyze_image(image_bytes):
-  image = Image.open(image_bytes)
+def analyze_image(file_obj):
+  image_bytes = file_obj.getvalue()
+  mime_type = "image/png" if file_obj.name.lower().endswith(".png") else "image/jpeg"
+
   prompt = """
     你是一個專業的旅遊行程規劃助手。請分析使用者上傳的這張旅遊/美食/景點截圖，並提取出核心的地點資訊。
     若一張圖包含多個推薦地點請全部列出。
@@ -127,24 +178,19 @@ def analyze_image(image_bytes):
     ]
     """
 
-  # 支援多模型備援
-  candidate_models = ["gemini-3.8-flash", "gemini-flash-latest"]
-  errors = []
+  res = call_gemini_api(clean_api_key, prompt, image_bytes, mime_type)
 
-  for model_name in candidate_models:
+  if res.status_code == 200:
+    data = res.json()
     try:
-      model = genai.GenerativeModel(
-          model_name=model_name,
-          generation_config={"response_mime_type": "application/json"},
-      )
-      response = model.generate_content([image, prompt])
-      return json.loads(response.text)
+      text = data["candidates"][0]["content"]["parts"][0]["text"]
+      return json.loads(text)
     except Exception as e:
-      errors.append(f"{model_name}: {e}")
-      continue
-
-  st.error(f"辨識失敗：\n" + "\n".join(errors))
-  return []
+      st.error(f"JSON 解析失敗：{e}")
+      return []
+  else:
+    st.error(f"API 請求失敗 ({res.status_code})：{res.text}")
+    return []
 
 
 # ----------------- 點擊按鈕執行分析 -----------------
@@ -246,4 +292,3 @@ if "places" in st.session_state and st.session_state["places"]:
       st_folium(m, width="100%", height=550)
     else:
       st.warning("未能取得有效經緯度座標。")
-    
