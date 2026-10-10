@@ -38,9 +38,8 @@ user_key = st.sidebar.text_input(
 
 # ----------------- REST API 呼叫輔助函式 -----------------
 def call_gemini_api(api_key, prompt, image_bytes, mime_type="image/jpeg"):
-  """直接透過 REST API 呼叫 Gemini，避免 SDK 內部 OAuth 認證錯誤"""
-  # 使用官方最新支援 API Key 的通用端點
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+  # 將原本的 gemini-2.5-flash 改為 gemini-3.8-flash
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
 
   encoded_image = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -73,7 +72,7 @@ if st.sidebar.button("🔍 測試 Key 連線狀態"):
     st.sidebar.error("請先輸入 API Key！")
   else:
     key = user_key.strip().strip('"').strip("'")
-    test_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+    test_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={key}"
     payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
     try:
       res = requests.post(test_url, json=payload, timeout=10)
