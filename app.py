@@ -15,41 +15,29 @@ st.set_page_config(
 st.title("✈️ 社畜截圖轉行程 AI 助手")
 st.caption("自動萃取社群截圖中的景點、最佳順路動線排序與一鍵導航！")
 
-# ----------------- 取得 API KEY (Secrets 優先，支援側邊欄手動輸入) -----------------
-raw_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-clean_key = (
-    str(raw_key).strip().strip('"').strip("'")
-    if raw_key
-    else ""
+# 側邊欄：使用者自備 API Key
+st.sidebar.header("🔑 使用者設定")
+st.sidebar.markdown(
+    "本工具使用您個人的 Google Gemini 額度。\n"
+    "[👉 點此免費取得 Gemini API Key](https://aistudio.google.com/app/apikey)"
 )
 
-st.sidebar.header("🔑 API 金鑰設定")
 user_key = st.sidebar.text_input(
-    "Gemini API Key",
-    value=clean_key,
+    "請輸入您的 Gemini API Key",
     type="password",
-    help="若已在 Secrets 設定則會自動帶入，亦可在此直接貼上覆蓋。",
+    placeholder="AIzaSy...",
+    help="金鑰僅供本次瀏覽階段使用，不會儲存於伺服器。",
 )
-
-# 快速連線測試按鈕
-if st.sidebar.button("🔍 測試 Key 連線狀態"):
-  if not user_key:
-    st.sidebar.error("請先輸入 API Key！")
-  else:
-    try:
-      genai.configure(api_key=user_key)
-      test_model = genai.GenerativeModel("gemini-3.8-flash")
-      test_res = test_model.generate_content("Hello")
-      st.sidebar.success("✅ 連線成功！API Key 正常運作中。")
-    except Exception as e:
-      st.sidebar.error(f"❌ 連線失敗：{e}")
 
 if not user_key:
-  st.warning("👈 請在左側側邊欄輸入有效的 Gemini API Key 才能開始辨識！")
+  st.info("👈 請在左側輸入您的 Gemini API Key 即可開始使用。")
   st.stop()
 
-# 全域配置金鑰
-genai.configure(api_key=user_key)
+# 關鍵防呆：徹底清理空白與可能夾帶的引號
+clean_api_key = user_key.strip().strip('"').strip("'")
+
+# 透過明確參數傳入，避免被底層認證攔截
+genai.configure(api_key=clean_api_key)
 
 
 # ----------------- 輔助函式：路徑智慧排序 -----------------
