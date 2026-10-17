@@ -1,3 +1,5 @@
+streamlit>=1.40.0
+standard-imghdr
 requests
 Pillow
 folium
