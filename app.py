@@ -232,13 +232,49 @@ DEMO_ITINERARIES = {
     ],
 }
 
-# 備援模型清單
-MODELS_TO_TRY = [
+# 預設優先嘗試的模型清單（已移除退役會報 404 的 gemini-1.5-flash，保留原版穩定別名與最新模型）
+DEFAULT_MODELS_TO_TRY = [
+    "gemini-flash-lite-latest",
+    "gemini-flash-latest",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
 ]
+
+
+def get_candidate_models(api_key):
+  """動態向 Google API 查詢該金鑰帳號實際支援的模型清單，避免寫死模型名稱導致 404。"""
+  candidates = list(DEFAULT_MODELS_TO_TRY)
+  if not api_key:
+    return candidates
+  try:
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    res = requests.get(list_url, timeout=8)
+    if res.status_code == 200:
+      models_info = res.json().get("models", [])
+      available = []
+      for m in models_info:
+        methods = m.get("supportedGenerationMethods", [])
+        name = m.get("name", "").replace("models/", "")
+        # 篩選支援 generateContent 且屬於 gemini 系列的通用多模態模型
+        if "generateContent" in methods and name.startswith("gemini"):
+          if not any(
+              skip in name
+              for skip in ["embedding", "tts", "audio", "imagen", "veo", "robotics", "computer-use"]
+          ):
+            available.append(name)
+
+      if available:
+        # 優先排列 flash / lite 系列模型，確保速度最快、額度最充裕
+        prioritized = [m for m in DEFAULT_MODELS_TO_TRY if m in available]
+        others = [m for m in available if m not in prioritized]
+        others.sort(key=lambda x: (0 if "flash" in x else 1, x))
+        return prioritized + others
+  except Exception:
+    pass
+  return candidates
+
 
 # ----------------- 側邊欄：API 金鑰與 Demo 模式 -----------------
 st.sidebar.header("🎯 駭客松快速體驗")
@@ -273,23 +309,35 @@ if st.sidebar.button("🔍 測試 Key 連線狀態", use_container_width=True):
   if not clean_api_key:
     st.sidebar.error("請先輸入 API Key！")
   else:
+    models_to_test = get_candidate_models(clean_api_key)
     success = False
-    last_msg = ""
-    for model_name in MODELS_TO_TRY:
+    error_logs = []
+
+    for model_name in models_to_test:
       test_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_api_key}"
       payload = {"contents": [{"parts": [{"text": "Hello"}]}]}
       try:
         res = requests.post(test_url, json=payload, timeout=10)
         if res.status_code == 200:
-          st.sidebar.success(f"✅ 連線成功！可用模型：{model_name}")
+          st.sidebar.success(f"✅ 連線成功！當前可用模型：{model_name}")
+          st.session_state["working_model"] = model_name
           success = True
           break
         else:
-          last_msg = f"{model_name} ({res.status_code})"
+          err_detail = ""
+          try:
+            err_detail = res.json().get("error", {}).get("message", "")[:60]
+          except Exception:
+            err_detail = res.text[:60]
+          error_logs.append(f"• {model_name} (HTTP {res.status_code}): {err_detail}")
       except Exception as e:
-        last_msg = f"{model_name}: {e}"
+        error_logs.append(f"• {model_name}: {e}")
+
     if not success:
-      st.sidebar.error(f"❌ 連線失敗：{last_msg}")
+      st.sidebar.error(
+          "❌ 全部模型連線失敗，請檢查 API Key 是否正確或額度是否已滿：\n"
+          + "\n".join(error_logs[:4])
+      )
 
 # ----------------- 側邊欄：上傳與觸發按鈕 -----------------
 st.sidebar.markdown("---")
@@ -307,7 +355,7 @@ start_button = st.sidebar.button(
 # ----------------- 輔助函式：自動生成預設導遊語音講稿 -----------------
 def ensure_audio_script(place_dict, idx):
   """若景點沒有 audio_script，動態組合一段自然生動的隨身導遊解說。"""
-  script = place_dict.get("audio_script", "").strip()
+  script = str(place_dict.get("audio_script") or "").strip()
   if script:
     return script
   name = place_dict.get("name", f"第{idx}站")
@@ -538,7 +586,7 @@ def render_single_tts_button(script_text, stop_idx, place_name):
   components.html(btn_html, height=38)
 
 
-# ----------------- 核心解析函式（多模型動態備援 REST 呼叫 + 產出語音導覽講稿） -----------------
+# ----------------- 核心解析函式（動態探索可用模型 + 備援 REST 呼叫） -----------------
 def analyze_image(file_obj):
   image_bytes = file_obj.getvalue()
   mime_type = (
@@ -587,20 +635,31 @@ def analyze_image(file_obj):
   headers = {"Content-Type": "application/json"}
   errors = []
 
-  for model_name in MODELS_TO_TRY:
+  models_to_try = get_candidate_models(clean_api_key)
+  if st.session_state.get("working_model") in models_to_try:
+    wm = st.session_state["working_model"]
+    models_to_try = [wm] + [m for m in models_to_try if m != wm]
+
+  for model_name in models_to_try:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_api_key}"
     try:
       res = requests.post(url, headers=headers, json=payload, timeout=35)
       if res.status_code == 200:
         data = res.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
+        st.session_state["working_model"] = model_name
         return json.loads(text)
       else:
-        errors.append(f"{model_name} (HTTP {res.status_code})")
+        err_msg = ""
+        try:
+          err_msg = res.json().get("error", {}).get("message", "")[:60]
+        except Exception:
+          err_msg = res.text[:60]
+        errors.append(f"{model_name} (HTTP {res.status_code}: {err_msg})")
     except Exception as e:
       errors.append(f"{model_name} ({e})")
 
-  st.error("所有備援模型皆呼叫失敗：\n" + "\n".join(errors))
+  st.error("所有備援模型皆呼叫失敗：\n" + "\n".join(errors[:5]))
   return []
 
 
@@ -642,14 +701,13 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           height: 610px;
           border-radius: 18px;
           overflow: hidden;
-          /* 天空與地平線漸層背景，徹底避免任何白屏感 */
           background: linear-gradient(180deg, #0f172a 0%, #1e3a8a 26%, #bae6fd 52%, #e2e8f0 100%);
           box-shadow: 0 14px 30px rgba(15, 23, 42, 0.22);
           border: 1px solid #cbd5e1;
           perspective: 950px;
         }}
 
-        /* 3D 傾斜地圖舞台（擴大範圍確保 48 度傾斜旋轉時四周不露白邊） */
+        /* 3D 傾斜地圖舞台 */
         #map-stage {{
           position: absolute;
           top: -22%;
@@ -672,7 +730,7 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           background: #dbeafe;
         }}
 
-        /* 遠景大氣霧化遮罩，增強 3D 景深立體感 */
+        /* 遠景大氣霧化遮罩 */
         .horizon-fog {{
           position: absolute;
           top: 0;
@@ -767,7 +825,7 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           cursor: pointer;
         }}
 
-        /* 螢幕空間直立 3D 旅人覆蓋層（永遠保持清晰直立，不隨地面扁平化） */
+        /* 螢幕空間直立 3D 旅人覆蓋層 */
         #avatar-overlay {{
           position: absolute;
           top: 0;
@@ -886,17 +944,11 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
             <div class="speech-bubble" id="bubble-text">📍 第 1 站：載入中...</div>
             <div class="avatar-body" id="avatar-sprite">
               <svg viewBox="0 0 64 72" width="58" height="64">
-                <!-- 登山背包 -->
                 <rect x="8" y="25" width="13" height="23" rx="5" fill="#ea580c" stroke="#fff" stroke-width="2"/>
-                <!-- 身體連帽外套 -->
                 <rect x="17" y="24" width="27" height="26" rx="9" fill="#2563eb" stroke="#fff" stroke-width="2.5"/>
-                <!-- 背包背帶 -->
                 <path d="M22 25 L22 46" stroke="#fde047" stroke-width="3" stroke-linecap="round"/>
-                <!-- 頭部 -->
                 <circle cx="32" cy="14" r="11.5" fill="#fde68a" stroke="#fff" stroke-width="2.5"/>
-                <!-- 太陽眼鏡 -->
                 <rect x="25" y="10" width="17" height="6" rx="3" fill="#0f172a"/>
-                <!-- 雙腿 -->
                 <rect x="20" y="48" width="8.5" height="15" rx="4" fill="#1e293b" stroke="#fff" stroke-width="1.5"/>
                 <rect x="33" y="48" width="8.5" height="15" rx="4" fill="#1e293b" stroke="#fff" stroke-width="1.5"/>
               </svg>
@@ -947,7 +999,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
         let currentLat = places[0].lat;
         let currentLon = places[0].lon;
 
-        // 建立 Leaflet 地圖（與 Folium 相同底層，100% 在 Streamlit iframe 中穩定渲染圖磚）
         const map = L.map('leaflet-map', {{
           center: [places[0].lat, places[0].lon],
           zoom: 15,
@@ -955,7 +1006,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           attributionControl: false
         }});
 
-        // 提供三種高穩定度圖磚來源（Google 繁中街道圖、Google 衛星實景混合圖、OpenStreetMap 備援）
         const tileLayers = {{
           street: L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&hl=zh-TW', {{
             maxZoom: 20
@@ -968,7 +1018,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           }})
         }};
 
-        // 預設載入清晰的 Google 街道圖，若發生任何圖磚載入錯誤自動無縫切換至 OpenStreetMap
         let activeLayer = tileLayers.street;
         activeLayer.on('tileerror', function() {{
           if (activeLayer !== tileLayers.osm) {{
@@ -979,7 +1028,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
         }});
         activeLayer.addTo(map);
 
-        // 繪製底層完整規劃路線與已走過的高亮軌跡
         const allLatLngs = places.map(p => [p.lat, p.lon]);
         L.polyline(allLatLngs, {{
           color: '#38bdf8',
@@ -1002,7 +1050,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           lineCap: 'round'
         }}).addTo(map);
 
-        // 建立每一站的 3D 地標圖釘
         const pinElements = [];
         places.forEach((p, idx) => {{
           const iconHtml = `
@@ -1025,13 +1072,11 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           pinElements.push(marker);
         }});
 
-        // 將經緯度即時投影到 3D 傾斜後的螢幕像素座標，讓 3D 小人永遠精準站在路線上
         function syncTravelerScreenPosition() {{
           const stage = document.getElementById('map-stage');
           const viewport = document.getElementById('viewport');
           const pt = map.latLngToContainerPoint([currentLat, currentLon]);
 
-          // 建立一個隱形定位點在 map-stage 內，透過 getBoundingClientRect 取得經 CSS 3D 矩陣變換後的真實螢幕座標
           let probe = document.getElementById('coord-probe');
           if (!probe) {{
             probe = document.createElement('div');
@@ -1062,7 +1107,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           syncTravelerScreenPosition();
         }});
 
-        // AI 語音播報函式 (Web Speech API)
         function speakStopGuide(idx, onDoneCallback) {{
           const p = places[idx];
           const scriptText = p.audio_script || (`抵達第 ${{idx + 1}} 站 ${{p.name}}，推薦必看：${{p.must_try_or_see}}`);
@@ -1184,11 +1228,9 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
             currentLat = start.lat + (end.lat - start.lat) * smoothT;
             currentLon = start.lon + (end.lon - start.lon) * smoothT;
 
-            // 鏡頭平滑跟隨小人移動
             map.panTo([currentLat, currentLon], {{ animate: false }});
             syncTravelerScreenPosition();
 
-            // 更新已走過的橘色路線
             const walkedCoords = places.slice(0, fromIdx + 1).map(p => [p.lat, p.lon]);
             walkedCoords.push([currentLat, currentLon]);
             walkedPolyline.setLatLngs(walkedCoords);
@@ -1212,7 +1254,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
               syncTravelerScreenPosition();
               updateHudAtStop(currentIndex);
 
-              // 抵達新站點時，自動語音播報該站導覽詞，播畢後繼續前往下一站
               speakStopGuide(currentIndex, () => {{
                 if (isPlaying) onComplete();
               }});
@@ -1297,7 +1338,6 @@ def render_3d_walking_map(enriched_places, travel_mode="walking"):
           speedMultiplier = parseFloat(document.getElementById('speed-sel').value || '2');
         }}
 
-        // 初始化定位與介面文字
         setTimeout(() => {{
           map.invalidateSize();
           syncTravelerScreenPosition();
