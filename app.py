@@ -1,11 +1,9 @@
 import base64
 from datetime import datetime, timedelta
-import io
 import json
 import urllib.parse
 import folium
 from geopy.distance import geodesic
-from PIL import Image, ImageDraw, ImageFont
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -18,7 +16,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# 自訂頂部與集章卡視覺樣式
+# 自訂頂部與導遊講稿視覺樣式
 st.markdown(
     """
     <style>
@@ -58,53 +56,6 @@ st.markdown(
         font-size: 0.82rem;
         color: #64748b;
     }
-    /* 集章卡視覺樣式 */
-    .stamp-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
-        gap: 12px;
-        margin-top: 10px;
-        margin-bottom: 14px;
-    }
-    .stamp-slot {
-        background: #fffbeb;
-        border: 2px dashed #d97706;
-        border-radius: 14px;
-        padding: 12px 10px;
-        text-align: center;
-        position: relative;
-        transition: all 0.2s ease;
-    }
-    .stamp-slot.done {
-        background: #fef2f2;
-        border: 2px solid #dc2626;
-        box-shadow: 0 4px 12px rgba(220, 38, 38, 0.12);
-    }
-    .stamp-seal {
-        width: 64px;
-        height: 64px;
-        margin: 0 auto 6px auto;
-        border-radius: 50%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        font-weight: 900;
-        font-size: 12px;
-        line-height: 1.15;
-    }
-    .stamp-seal.locked {
-        border: 2px dashed #94a3b8;
-        color: #94a3b8;
-        background: #f8fafc;
-    }
-    .stamp-seal.unlocked {
-        border: 3px double #dc2626;
-        color: #dc2626;
-        background: rgba(254, 226, 226, 0.65);
-        transform: rotate(-10deg);
-        box-shadow: inset 0 0 0 2px rgba(220, 38, 38, 0.25);
-    }
     .guide-box {
         background: #f0f9ff;
         border-left: 4px solid #0284c7;
@@ -116,8 +67,8 @@ st.markdown(
     }
     </style>
     <div class="hero-banner">
-        <h1>✈️ 上班截圖、下班出發：社畜無腦排行程 AI (3D 語音導遊 & 集章版)</h1>
-        <p>IG、小紅書截圖一鍵丟！AI 自動抓出神秘景點、最佳化順路動線，支援 3D 分身漫遊、隨身語音導遊與踩點集章海報！</p>
+        <h1>✈️ 上班截圖、下班出發：社畜無腦排行程 AI (3D 實景語音導遊版)</h1>
+        <p>IG、小紅書截圖一鍵丟！AI 自動抓出神秘景點、最佳化順路動線，還能讓 3D 分身邊走邊為你語音導覽！</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -289,12 +240,6 @@ MODELS_TO_TRY = [
     "gemini-1.5-flash",
 ]
 
-# 初始化打卡狀態與照片紀錄
-if "checked_places" not in st.session_state:
-  st.session_state["checked_places"] = set()
-if "checkin_photos" not in st.session_state:
-  st.session_state["checkin_photos"] = {}
-
 # ----------------- 側邊欄：API 金鑰與 Demo 模式 -----------------
 st.sidebar.header("🎯 駭客松快速體驗")
 demo_choice = st.sidebar.selectbox(
@@ -305,8 +250,6 @@ if st.sidebar.button("✨ 載入 Demo 行程（立即可玩 3D）", use_containe
   st.session_state["places"] = [
       dict(item) for item in DEMO_ITINERARIES[demo_choice]
   ]
-  st.session_state["checked_places"] = set()
-  st.session_state["checkin_photos"] = {}
   st.toast(f"已載入：{demo_choice}", icon="🎉")
 
 st.sidebar.markdown("---")
@@ -535,169 +478,6 @@ def generate_ics_content(enriched_places):
   return "\r\n".join(lines)
 
 
-# ----------------- 輔助函式：Pillow 動態合成「今日制霸集章紀念海報」 -----------------
-def load_cjk_font(size):
-  """自動尋找系統可用的中日韓字型，確保海報中文不亂碼。"""
-  font_candidates = [
-      "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-      "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-      "/System/Library/Fonts/PingFang.ttc",
-      "/System/Library/Fonts/STHeiti Light.ttc",
-      "C:/Windows/Fonts/msjhbd.ttc",
-      "C:/Windows/Fonts/msjh.ttc",
-      "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-  ]
-  for path in font_candidates:
-    try:
-      return ImageFont.truetype(path, size)
-    except Exception:
-      continue
-  return ImageFont.load_default()
-
-
-def generate_stamp_poster_png(
-    enriched_places, summary, checked_set, photos_dict
-):
-  """使用 Pillow 繪製精美拍立得風格的『打卡集章紀念海報』並回傳 PNG bytes。"""
-  n = len(enriched_places)
-  width = 880
-  row_h = 128
-  height = 280 + n * row_h + 110
-
-  img = Image.new("RGB", (width, height), (253, 250, 243))
-  draw = ImageDraw.Draw(img)
-
-  font_title = load_cjk_font(32)
-  font_sub = load_cjk_font(18)
-  font_card_title = load_cjk_font(22)
-  font_body = load_cjk_font(16)
-  font_stamp = load_cjk_font(18)
-
-  # 頂部深藍漸層橫幅
-  draw.rectangle([(0, 0), (width, 165)], fill=(15, 23, 42))
-  draw.rectangle([(0, 158), (width, 165)], fill=(245, 158, 11))
-
-  city_title = enriched_places[0].get("city", "精選旅遊") if enriched_places else "旅遊"
-  today_disp = datetime.now().strftime("%Y.%m.%d")
-  draw.text(
-      (36, 28),
-      f"✈️ {city_title}・順路制霸集章紀念卡",
-      fill=(255, 255, 255),
-      font=font_title,
-  )
-  boba_cnt = round(summary["calories"] / 450, 1)
-  draw.text(
-      (36, 78),
-      f"📅 日期：{today_disp}   ｜   🛣️ 總路程：{summary['total_km']} km   ｜   🧋 消耗熱量：{summary['calories']} kcal ({boba_cnt} 杯珍奶)",
-      fill=(186, 230, 253),
-      font=font_sub,
-  )
-  done_cnt = sum(1 for p in enriched_places if p.get("name") in checked_set)
-  draw.text(
-      (36, 114),
-      f"💮 集章進度：已解鎖 {done_cnt} / {n} 站   （{'🎉 全程完美制霸！' if done_cnt == n else '持續探索中！'}）",
-      fill=(253, 224, 71),
-      font=font_sub,
-  )
-
-  # 繪製每一站卡片與印章
-  y_cursor = 195
-  for idx, p in enumerate(enriched_places, 1):
-    name = p.get("name", f"第{idx}站")
-    is_checked = name in checked_set
-
-    card_bg = (255, 245, 245) if is_checked else (255, 255, 255)
-    border_col = (220, 38, 38) if is_checked else (203, 213, 225)
-    draw.rounded_rectangle(
-        [(36, y_cursor), (width - 36, y_cursor + row_h - 16)],
-        radius=16,
-        fill=card_bg,
-        outline=border_col,
-        width=3 if is_checked else 2,
-    )
-
-    # 左側站別編號圓章
-    cx, cy = 84, y_cursor + (row_h - 16) // 2
-    circle_col = (220, 38, 38) if is_checked else (37, 99, 235)
-    draw.ellipse([(cx - 26, cy - 26), (cx + 26, cy + 26)], fill=circle_col)
-    draw.text((cx - 14, cy - 13), f"0{idx}", fill=(255, 255, 255), font=font_card_title)
-
-    # 中間景點文字
-    draw.text(
-        (130, y_cursor + 16),
-        f"[{p['arrive_time']} - {p['depart_time']}]  {name}",
-        fill=(15, 23, 42),
-        font=font_card_title,
-    )
-    draw.text(
-        (130, y_cursor + 52),
-        f"🏷️ {p.get('category', '景點')}  ｜  💡 必看亮點：{p.get('must_try_or_see', '')}",
-        fill=(71, 85, 105),
-        font=font_body,
-    )
-    draw.text(
-        (130, y_cursor + 80),
-        f"🎙️ 導遊小記：{p.get('audio_script', '')[:34]}...",
-        fill=(3, 105, 161),
-        font=font_body,
-    )
-
-    # 若有上傳打卡照片，縮圖貼在右側印章旁
-    if name in photos_dict and photos_dict[name]:
-      try:
-        user_img = Image.open(io.BytesIO(photos_dict[name])).convert("RGB")
-        user_img.thumbnail((84, 84))
-        px = width - 255
-        py = y_cursor + 14
-        draw.rectangle(
-            [(px - 4, py - 4), (px + user_img.width + 4, py + user_img.height + 4)],
-            fill=(255, 255, 255),
-            outline=(203, 213, 225),
-            width=2,
-        )
-        img.paste(user_img, (px, py))
-      except Exception:
-        pass
-
-    # 右側日本車站風紀念印章
-    sx, sy = width - 105, y_cursor + (row_h - 16) // 2
-    if is_checked:
-      draw.ellipse(
-          [(sx - 40, sy - 40), (sx + 40, sy + 40)],
-          outline=(220, 38, 38),
-          width=4,
-      )
-      draw.ellipse(
-          [(sx - 34, sy - 34), (sx + 34, sy + 34)],
-          outline=(220, 38, 38),
-          width=1,
-      )
-      draw.text((sx - 26, sy - 20), "💮已踩點", fill=(220, 38, 38), font=font_stamp)
-      draw.text((sx - 24, sy + 4), "PASS!", fill=(220, 38, 38), font=font_body)
-    else:
-      draw.ellipse(
-          [(sx - 38, sy - 38), (sx + 38, sy + 38)],
-          outline=(148, 163, 184),
-          width=2,
-      )
-      draw.text((sx - 26, sy - 10), "待解鎖", fill=(148, 163, 184), font=font_stamp)
-
-    y_cursor += row_h
-
-  # 底部簽名欄
-  draw.text(
-      (36, height - 55),
-      "Generated by 截圖轉行程 Travel Pin-to-Itinerary AI ｜ 上班截圖、下班出發！",
-      fill=(100, 116, 139),
-      font=font_body,
-  )
-
-  buf = io.BytesIO()
-  img.save(buf, format="PNG")
-  return buf.getvalue()
-
-
 # ----------------- 輔助函式：單站獨立語音播報按鈕 (Web Speech API) -----------------
 def render_single_tts_button(script_text, stop_idx, place_name):
   """渲染一個小巧的 HTML5 語音導覽播放按鈕。"""
@@ -824,16 +604,14 @@ def analyze_image(file_obj):
   return []
 
 
-# ----------------- 3D 旅人漫遊地圖組件 (MapLibre 3D + 動畫角色 + AI 隨身語音導遊) -----------------
-def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
-  """使用 MapLibre GL JS 建立 62 度傾斜 3D 立體地圖、行走小人與 Web Speech 隨身語音導遊。"""
-  valid_places = []
-  for p in enriched_places:
-    if p.get("lat") is not None and p.get("lon") is not None:
-      item = dict(p)
-      item["is_checked"] = item.get("name") in checked_set
-      valid_places.append(item)
-
+# ----------------- 3D 旅人漫遊地圖組件 (Leaflet 核心 + CSS 3D 立體透視 + AI 隨身語音導遊) -----------------
+def render_3d_walking_map(enriched_places, travel_mode="walking"):
+  """使用與 Folium 相同、100% 支援 Streamlit iframe 的 Leaflet 圖磚引擎，結合 CSS3 3D 透視傾斜舞台與直立 3D 旅人動畫。"""
+  valid_places = [
+      dict(p)
+      for p in enriched_places
+      if p.get("lat") is not None and p.get("lon") is not None
+  ]
   if not valid_places:
     st.warning("無有效座標可供渲染 3D 地圖。")
     return
@@ -848,33 +626,76 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
     <html>
     <head>
       <meta charset="utf-8" />
-      <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-      <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+      <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
       <style>
-        body {{ margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-        #map-wrapper {{
+        * {{ box-sizing: border-box; }}
+        body {{
+          margin: 0;
+          padding: 0;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          background: transparent;
+        }}
+        #viewport {{
           position: relative;
           width: 100%;
           height: 610px;
-          border-radius: 16px;
+          border-radius: 18px;
           overflow: hidden;
-          box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+          /* 天空與地平線漸層背景，徹底避免任何白屏感 */
+          background: linear-gradient(180deg, #0f172a 0%, #1e3a8a 26%, #bae6fd 52%, #e2e8f0 100%);
+          box-shadow: 0 14px 30px rgba(15, 23, 42, 0.22);
           border: 1px solid #cbd5e1;
+          perspective: 950px;
         }}
-        #map {{ width: 100%; height: 100%; }}
 
-        /* 頂部 RPG 狀態資訊列 */
+        /* 3D 傾斜地圖舞台（擴大範圍確保 48 度傾斜旋轉時四周不露白邊） */
+        #map-stage {{
+          position: absolute;
+          top: -22%;
+          left: -22%;
+          width: 144%;
+          height: 144%;
+          transform-origin: 50% 55%;
+          transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+        }}
+        #map-stage.tilted-3d {{
+          transform: rotateX(48deg) scale(1.06);
+        }}
+        #map-stage.flat-2d {{
+          transform: rotateX(0deg) scale(0.72);
+        }}
+
+        #leaflet-map {{
+          width: 100%;
+          height: 100%;
+          background: #dbeafe;
+        }}
+
+        /* 遠景大氣霧化遮罩，增強 3D 景深立體感 */
+        .horizon-fog {{
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 115px;
+          background: linear-gradient(180deg, rgba(15, 23, 42, 0.78) 0%, rgba(30, 58, 138, 0.28) 55%, rgba(255, 255, 255, 0) 100%);
+          pointer-events: none;
+          z-index: 400;
+        }}
+
+        /* 頂部 RPG 狀態與 AI 導遊字幕列 */
         .hud-top {{
           position: absolute;
           top: 12px;
           left: 12px;
-          right: 52px;
+          right: 12px;
           display: flex;
           justify-content: space-between;
           align-items: flex-start;
           gap: 10px;
           pointer-events: none;
-          z-index: 10;
+          z-index: 800;
         }}
         .hud-badge {{
           background: rgba(15, 23, 42, 0.88);
@@ -883,10 +704,10 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           padding: 10px 15px;
           border-radius: 12px;
           font-size: 13px;
-          box-shadow: 0 4px 15px rgba(0,0,0,0.25);
-          border: 1px solid rgba(255,255,255,0.15);
+          box-shadow: 0 4px 15px rgba(0,0,0,0.28);
+          border: 1px solid rgba(255,255,255,0.16);
           pointer-events: auto;
-          max-width: 62%;
+          max-width: 65%;
         }}
         .hud-badge strong {{
           color: #38bdf8;
@@ -895,7 +716,7 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
         .guide-subtitle {{
           margin-top: 5px;
           padding-top: 5px;
-          border-top: 1px solid rgba(255,255,255,0.15);
+          border-top: 1px solid rgba(255,255,255,0.16);
           color: #fde047;
           font-size: 12.5px;
           line-height: 1.4;
@@ -913,10 +734,10 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           border-radius: 999px;
           display: flex;
           align-items: center;
-          gap: 8px;
-          z-index: 10;
-          box-shadow: 0 8px 25px rgba(0,0,0,0.35);
-          border: 1px solid rgba(255,255,255,0.18);
+          gap: 7px;
+          z-index: 800;
+          box-shadow: 0 8px 25px rgba(0,0,0,0.38);
+          border: 1px solid rgba(255,255,255,0.2);
           color: white;
           white-space: nowrap;
         }}
@@ -924,7 +745,7 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           background: #2563eb;
           color: white;
           border: none;
-          padding: 7px 13px;
+          padding: 7px 12px;
           border-radius: 999px;
           font-size: 12.5px;
           font-weight: 600;
@@ -943,32 +764,44 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           border-radius: 8px;
           padding: 5px 7px;
           font-size: 12px;
+          cursor: pointer;
         }}
 
-        /* 3D 旅人立體角色與腳步動畫 */
-        .traveler-container {{
-          position: relative;
-          width: 68px;
-          height: 84px;
+        /* 螢幕空間直立 3D 旅人覆蓋層（永遠保持清晰直立，不隨地面扁平化） */
+        #avatar-overlay {{
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          pointer-events: none;
+          z-index: 650;
+          overflow: hidden;
+        }}
+        .traveler-screen-node {{
+          position: absolute;
+          width: 76px;
+          height: 94px;
+          transform: translate(-50%, -88%);
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: flex-end;
           pointer-events: none;
+          will-change: left, top;
         }}
         .speech-bubble {{
           position: absolute;
-          bottom: 78px;
+          bottom: 84px;
           background: #ffffff;
           color: #0f172a;
-          padding: 7px 11px;
+          padding: 7px 12px;
           border-radius: 12px;
-          font-size: 12px;
-          font-weight: 700;
+          font-size: 12.5px;
+          font-weight: 800;
           white-space: nowrap;
-          box-shadow: 0 6px 18px rgba(0,0,0,0.22);
+          box-shadow: 0 8px 20px rgba(15, 23, 42, 0.28);
           border: 2px solid #2563eb;
-          transition: all 0.2s ease;
         }}
         .speech-bubble::after {{
           content: "";
@@ -981,74 +814,119 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           border-color: #2563eb transparent;
         }}
         .avatar-body {{
-          width: 52px;
-          height: 58px;
+          width: 58px;
+          height: 64px;
           position: relative;
           transform-origin: bottom center;
+          filter: drop-shadow(0 6px 8px rgba(15, 23, 42, 0.35));
         }}
         .avatar-walking {{
-          animation: bobbing 0.42s infinite alternate ease-in-out;
+          animation: walk-bounce 0.38s infinite alternate ease-in-out;
         }}
-        @keyframes bobbing {{
-          0% {{ transform: translateY(0px) rotate(-5deg) scale(1.02); }}
-          100% {{ transform: translateY(-9px) rotate(5deg) scale(1.06); }}
+        @keyframes walk-bounce {{
+          0% {{ transform: translateY(0px) rotate(-6deg) scale(1.02); }}
+          100% {{ transform: translateY(-11px) rotate(6deg) scale(1.08); }}
         }}
         .avatar-shadow {{
-          width: 34px;
-          height: 11px;
-          background: rgba(15, 23, 42, 0.42);
+          width: 38px;
+          height: 12px;
+          background: rgba(15, 23, 42, 0.48);
           border-radius: 50%;
           filter: blur(2px);
-          margin-top: -4px;
+          margin-top: -5px;
         }}
 
-        /* 站點 3D 立柱地標 */
+        /* 站點 3D 立柱地標樣式 */
+        .stop-pin-wrapper {{
+          background: transparent;
+          border: none;
+        }}
         .stop-pin {{
-          background: linear-gradient(135deg, #2563eb, #0ea5e9);
+          display: inline-block;
+          background: linear-gradient(135deg, #1d4ed8, #0284c7);
           color: white;
           font-weight: 800;
           font-size: 12px;
-          padding: 4px 9px;
+          padding: 5px 10px;
           border-radius: 999px;
           border: 2px solid white;
-          box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+          box-shadow: 0 6px 12px rgba(15, 23, 42, 0.4);
+          white-space: nowrap;
+          transform: translate(-50%, -100%);
           cursor: pointer;
-          transition: transform 0.2s;
+          transition: all 0.2s ease;
         }}
-        .stop-pin:hover {{ transform: scale(1.18); }}
         .stop-pin.active {{
-          background: linear-gradient(135deg, #f59e0b, #ef4444);
-          transform: scale(1.22);
+          background: linear-gradient(135deg, #f59e0b, #dc2626);
+          transform: translate(-50%, -110%) scale(1.18);
+          z-index: 999;
         }}
-        .stop-pin.stamped {{
-          background: linear-gradient(135deg, #dc2626, #be123c);
-          border: 2px solid #fef08a;
+        .stop-stem {{
+          width: 4px;
+          height: 14px;
+          background: #ffffff;
+          margin: -2px auto 0 auto;
+          border-radius: 2px;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.4);
         }}
       </style>
     </head>
     <body>
-      <div id="map-wrapper">
-        <div id="map"></div>
+      <div id="viewport">
+        <!-- 3D 傾斜地圖舞台 -->
+        <div id="map-stage" class="tilted-3d">
+          <div id="leaflet-map"></div>
+        </div>
 
+        <div class="horizon-fog"></div>
+
+        <!-- 直立 3D 旅人覆蓋層 -->
+        <div id="avatar-overlay">
+          <div class="traveler-screen-node" id="traveler-node">
+            <div class="speech-bubble" id="bubble-text">📍 第 1 站：載入中...</div>
+            <div class="avatar-body" id="avatar-sprite">
+              <svg viewBox="0 0 64 72" width="58" height="64">
+                <!-- 登山背包 -->
+                <rect x="8" y="25" width="13" height="23" rx="5" fill="#ea580c" stroke="#fff" stroke-width="2"/>
+                <!-- 身體連帽外套 -->
+                <rect x="17" y="24" width="27" height="26" rx="9" fill="#2563eb" stroke="#fff" stroke-width="2.5"/>
+                <!-- 背包背帶 -->
+                <path d="M22 25 L22 46" stroke="#fde047" stroke-width="3" stroke-linecap="round"/>
+                <!-- 頭部 -->
+                <circle cx="32" cy="14" r="11.5" fill="#fde68a" stroke="#fff" stroke-width="2.5"/>
+                <!-- 太陽眼鏡 -->
+                <rect x="25" y="10" width="17" height="6" rx="3" fill="#0f172a"/>
+                <!-- 雙腿 -->
+                <rect x="20" y="48" width="8.5" height="15" rx="4" fill="#1e293b" stroke="#fff" stroke-width="1.5"/>
+                <rect x="33" y="48" width="8.5" height="15" rx="4" fill="#1e293b" stroke="#fff" stroke-width="1.5"/>
+              </svg>
+            </div>
+            <div class="avatar-shadow"></div>
+          </div>
+        </div>
+
+        <!-- 頂部 HUD 導覽列 -->
         <div class="hud-top">
           <div class="hud-badge" id="status-box">
             <strong>🕹️ 3D 實景預演 & AI 隨身語音導遊</strong><br/>
             <span id="status-text">點擊下方「▶️ 自動漫遊」，3D 旅人每走到一站會自動語音播報導覽！</span>
             <div class="guide-subtitle" id="guide-caption">🎙️ 導遊字幕：準備出發！</div>
           </div>
-          <div class="hud-badge" style="text-align:right; max-width:34%;">
+          <div class="hud-badge" style="text-align:right; max-width:33%;">
             <div>🕒 時段：<strong id="hud-time">--:--</strong></div>
             <div>👟 路程：<strong id="hud-dist">0.00 km</strong> (<span id="hud-boba">0.0</span> 杯珍奶🧋)</div>
           </div>
         </div>
 
+        <!-- 底部控制列 -->
         <div class="control-bar">
           <button class="ctrl-btn" id="btn-play" onclick="togglePlay()">▶️ 自動漫遊</button>
-          <button class="ctrl-btn secondary" onclick="stepPrev()">⏮️</button>
-          <button class="ctrl-btn secondary" onclick="stepNext()">⏭️</button>
-          <button class="ctrl-btn voice-on" id="btn-voice" onclick="toggleVoice()">🔊 語音導遊：開</button>
-          <button class="ctrl-btn secondary" onclick="speakCurrentStop()">🎙️ 重聽本站</button>
-          <button class="ctrl-btn secondary" onclick="toggleCameraFollow()" id="btn-cam">🎥 跟隨</button>
+          <button class="ctrl-btn secondary" onclick="stepPrev()" title="上一站">⏮️</button>
+          <button class="ctrl-btn secondary" onclick="stepNext()" title="下一站">⏭️</button>
+          <button class="ctrl-btn voice-on" id="btn-voice" onclick="toggleVoice()">🔊 語音：開</button>
+          <button class="ctrl-btn secondary" onclick="speakCurrentStop()">🎙️ 重聽</button>
+          <button class="ctrl-btn secondary" id="btn-tile" onclick="switchTileLayer()">🛰️ 切換衛星圖</button>
+          <button class="ctrl-btn secondary" id="btn-tilt" onclick="toggleTilt()">📐 3D 視角</button>
           <select class="speed-select" id="speed-sel" onchange="changeSpeed()">
             <option value="1">1x</option>
             <option value="2" selected>2x</option>
@@ -1061,47 +939,128 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
         const places = {places_json};
         let currentIndex = 0;
         let isPlaying = false;
-        let followCam = true;
         let voiceEnabled = true;
+        let isTilted3D = true;
+        let currentTileMode = 'street';
         let speedMultiplier = 2;
         let animFrame = null;
+        let currentLat = places[0].lat;
+        let currentLon = places[0].lon;
 
-        // 初始化 MapLibre 3D 傾斜地圖
-        const map = new maplibregl.Map({{
-          container: 'map',
-          style: 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json',
-          center: [places[0].lon, places[0].lat],
-          zoom: 15.2,
-          pitch: 62,
-          bearing: -18,
-          antialias: true
+        // 建立 Leaflet 地圖（與 Folium 相同底層，100% 在 Streamlit iframe 中穩定渲染圖磚）
+        const map = L.map('leaflet-map', {{
+          center: [places[0].lat, places[0].lon],
+          zoom: 15,
+          zoomControl: false,
+          attributionControl: false
         }});
 
-        map.addControl(new maplibregl.NavigationControl({{ visualizePitch: true }}), 'top-right');
+        // 提供三種高穩定度圖磚來源（Google 繁中街道圖、Google 衛星實景混合圖、OpenStreetMap 備援）
+        const tileLayers = {{
+          street: L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={{x}}&y={{y}}&z={{z}}&hl=zh-TW', {{
+            maxZoom: 20
+          }}),
+          satellite: L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={{x}}&y={{y}}&z={{z}}&hl=zh-TW', {{
+            maxZoom: 20
+          }}),
+          osm: L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+            maxZoom: 19
+          }})
+        }};
 
-        const stopMarkers = [];
+        // 預設載入清晰的 Google 街道圖，若發生任何圖磚載入錯誤自動無縫切換至 OpenStreetMap
+        let activeLayer = tileLayers.street;
+        activeLayer.on('tileerror', function() {{
+          if (activeLayer !== tileLayers.osm) {{
+            map.removeLayer(activeLayer);
+            activeLayer = tileLayers.osm;
+            activeLayer.addTo(map);
+          }}
+        }});
+        activeLayer.addTo(map);
 
-        // 建立 3D SVG 立體背包客小人
-        const travelerEl = document.createElement('div');
-        travelerEl.className = 'traveler-container';
-        travelerEl.innerHTML = `
-          <div class="speech-bubble" id="bubble-text">📍 第 1 站：${{places[0].name}}</div>
-          <div class="avatar-body" id="avatar-sprite">
-            <svg viewBox="0 0 64 72" width="52" height="58">
-              <rect x="10" y="26" width="12" height="22" rx="5" fill="#ea580c" stroke="#fff" stroke-width="2"/>
-              <rect x="18" y="24" width="26" height="26" rx="9" fill="#2563eb" stroke="#fff" stroke-width="2.5"/>
-              <circle cx="32" cy="14" r="11" fill="#fde68a" stroke="#fff" stroke-width="2.5"/>
-              <rect x="26" y="10" width="16" height="6" rx="3" fill="#0f172a"/>
-              <rect x="21" y="48" width="8" height="14" rx="4" fill="#1e293b" stroke="#fff" stroke-width="1.5"/>
-              <rect x="33" y="48" width="8" height="14" rx="4" fill="#1e293b" stroke="#fff" stroke-width="1.5"/>
-            </svg>
-          </div>
-          <div class="avatar-shadow"></div>
-        `;
+        // 繪製底層完整規劃路線與已走過的高亮軌跡
+        const allLatLngs = places.map(p => [p.lat, p.lon]);
+        L.polyline(allLatLngs, {{
+          color: '#38bdf8',
+          weight: 10,
+          opacity: 0.45,
+          lineCap: 'round'
+        }}).addTo(map);
 
-        const travelerMarker = new maplibregl.Marker({{ element: travelerEl, anchor: 'bottom' }})
-          .setLngLat([places[0].lon, places[0].lat])
-          .addTo(map);
+        L.polyline(allLatLngs, {{
+          color: '#2563eb',
+          weight: 5,
+          dashArray: '10, 8',
+          opacity: 0.9
+        }}).addTo(map);
+
+        const walkedPolyline = L.polyline([[places[0].lat, places[0].lon]], {{
+          color: '#f59e0b',
+          weight: 7,
+          opacity: 0.98,
+          lineCap: 'round'
+        }}).addTo(map);
+
+        // 建立每一站的 3D 地標圖釘
+        const pinElements = [];
+        places.forEach((p, idx) => {{
+          const iconHtml = `
+            <div class="stop-pin ${{idx === 0 ? 'active' : ''}}" id="pin-badge-${{idx}}">
+              ${{idx + 1}}. ${{p.name}}
+              <div class="stop-stem"></div>
+            </div>
+          `;
+          const customIcon = L.divIcon({{
+            className: 'stop-pin-wrapper',
+            html: iconHtml,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0]
+          }});
+          const marker = L.marker([p.lat, p.lon], {{ icon: customIcon }}).addTo(map);
+          marker.on('click', () => {{
+            jumpToStop(idx);
+            speakStopGuide(idx, null);
+          }});
+          pinElements.push(marker);
+        }});
+
+        // 將經緯度即時投影到 3D 傾斜後的螢幕像素座標，讓 3D 小人永遠精準站在路線上
+        function syncTravelerScreenPosition() {{
+          const stage = document.getElementById('map-stage');
+          const viewport = document.getElementById('viewport');
+          const pt = map.latLngToContainerPoint([currentLat, currentLon]);
+
+          // 建立一個隱形定位點在 map-stage 內，透過 getBoundingClientRect 取得經 CSS 3D 矩陣變換後的真實螢幕座標
+          let probe = document.getElementById('coord-probe');
+          if (!probe) {{
+            probe = document.createElement('div');
+            probe.id = 'coord-probe';
+            probe.style.position = 'absolute';
+            probe.style.width = '2px';
+            probe.style.height = '2px';
+            probe.style.pointerEvents = 'none';
+            stage.appendChild(probe);
+          }}
+          probe.style.left = pt.x + 'px';
+          probe.style.top = pt.y + 'px';
+
+          const probeRect = probe.getBoundingClientRect();
+          const viewRect = viewport.getBoundingClientRect();
+
+          const screenX = probeRect.left - viewRect.left;
+          const screenY = probeRect.top - viewRect.top;
+
+          const node = document.getElementById('traveler-node');
+          node.style.left = screenX + 'px';
+          node.style.top = screenY + 'px';
+        }}
+
+        map.on('move zoom viewreset resize', syncTravelerScreenPosition);
+        window.addEventListener('resize', () => {{
+          map.invalidateSize();
+          syncTravelerScreenPosition();
+        }});
 
         // AI 語音播報函式 (Web Speech API)
         function speakStopGuide(idx, onDoneCallback) {{
@@ -1135,95 +1094,48 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           voiceEnabled = !voiceEnabled;
           const btn = document.getElementById('btn-voice');
           if (voiceEnabled) {{
-            btn.innerText = '🔊 語音導遊：開';
+            btn.innerText = '🔊 語音：開';
             btn.classList.add('voice-on');
             btn.classList.remove('secondary');
             speakCurrentStop();
           }} else {{
             window.speechSynthesis.cancel();
-            btn.innerText = '🔇 語音導遊：關';
+            btn.innerText = '🔇 語音：關';
             btn.classList.remove('voice-on');
             btn.classList.add('secondary');
           }}
         }}
 
-        map.on('load', () => {{
-          const routeCoords = places.map(p => [p.lon, p.lat]);
+        function switchTileLayer() {{
+          map.removeLayer(activeLayer);
+          const btn = document.getElementById('btn-tile');
+          if (currentTileMode === 'street') {{
+            currentTileMode = 'satellite';
+            activeLayer = tileLayers.satellite;
+            btn.innerText = '🗺️ 切換街道圖';
+          }} else {{
+            currentTileMode = 'street';
+            activeLayer = tileLayers.street;
+            btn.innerText = '🛰️ 切換衛星圖';
+          }}
+          activeLayer.addTo(map);
+        }}
 
-          map.addSource('route-base', {{
-            type: 'geojson',
-            data: {{
-              type: 'Feature',
-              geometry: {{ type: 'LineString', coordinates: routeCoords }}
-            }}
-          }});
-
-          map.addLayer({{
-            id: 'route-glow',
-            type: 'line',
-            source: 'route-base',
-            layout: {{ 'line-join': 'round', 'line-cap': 'round' }},
-            paint: {{
-              'line-color': '#38bdf8',
-              'line-width': 10,
-              'line-opacity': 0.35
-            }}
-          }});
-
-          map.addLayer({{
-            id: 'route-line',
-            type: 'line',
-            source: 'route-base',
-            layout: {{ 'line-join': 'round', 'line-cap': 'round' }},
-            paint: {{
-              'line-color': '#2563eb',
-              'line-width': 5,
-              'line-dasharray': [2, 1.5]
-            }}
-          }});
-
-          map.addSource('route-walked', {{
-            type: 'geojson',
-            data: {{
-              type: 'Feature',
-              geometry: {{ type: 'LineString', coordinates: [routeCoords[0]] }}
-            }}
-          }});
-
-          map.addLayer({{
-            id: 'route-walked-line',
-            type: 'line',
-            source: 'route-walked',
-            layout: {{ 'line-join': 'round', 'line-cap': 'round' }},
-            paint: {{
-              'line-color': '#f59e0b',
-              'line-width': 6
-            }}
-          }});
-
-          places.forEach((p, idx) => {{
-            const pin = document.createElement('div');
-            pin.className = 'stop-pin' + (idx === 0 ? ' active' : '') + (p.is_checked ? ' stamped' : '');
-            const stampPrefix = p.is_checked ? '💮 ' : '';
-            pin.innerHTML = `${{stampPrefix}}${{idx + 1}}. ${{p.name}}`;
-            pin.onclick = () => {{
-              jumpToStop(idx);
-              speakStopGuide(idx, null);
-            }};
-
-            new maplibregl.Marker({{ element: pin, anchor: 'bottom' }})
-              .setLngLat([p.lon, p.lat])
-              .setPopup(new maplibregl.Popup({{ offset: 25 }}).setHTML(
-                `<b>第 ${{idx + 1}} 站：${{p.name}} ${{p.is_checked ? '💮已打卡' : ''}}</b><br/>` +
-                `🕒 ${{p.arrive_time}} - ${{p.depart_time}}<br/>` +
-                `💡 必看/必吃：${{p.must_try_or_see}}`
-              ))
-              .addTo(map);
-            stopMarkers.push(pin);
-          }});
-
-          updateHudAtStop(0);
-        }});
+        function toggleTilt() {{
+          isTilted3D = !isTilted3D;
+          const stage = document.getElementById('map-stage');
+          const btn = document.getElementById('btn-tilt');
+          if (isTilted3D) {{
+            stage.className = 'tilted-3d';
+            btn.innerText = '📐 3D 視角';
+          }} else {{
+            stage.className = 'flat-2d';
+            btn.innerText = '🗺️ 平面視角';
+          }}
+          setTimeout(syncTravelerScreenPosition, 50);
+          setTimeout(syncTravelerScreenPosition, 350);
+          setTimeout(syncTravelerScreenPosition, 620);
+        }}
 
         function calcCumDist(uptoIndex, partialFraction = 0) {{
           let d = 0;
@@ -1238,8 +1150,9 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
 
         function updateHudAtStop(idx) {{
           const p = places[idx];
-          stopMarkers.forEach((el, i) => {{
-            el.classList.toggle('active', i === idx);
+          places.forEach((_, i) => {{
+            const badge = document.getElementById(`pin-badge-${{i}}`);
+            if (badge) badge.classList.toggle('active', i === idx);
           }});
           const dist = calcCumDist(idx);
           const boba = (dist * 55 / 450).toFixed(1);
@@ -1261,20 +1174,6 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           const baseDuration = 3000 / speedMultiplier;
           const startTime = performance.now();
 
-          const dLon = end.lon - start.lon;
-          const dLat = end.lat - start.lat;
-          const angleDeg = (Math.atan2(dLon, dLat) * 180 / Math.PI);
-
-          if (followCam) {{
-            map.easeTo({{
-              center: [(start.lon + end.lon) / 2, (start.lat + end.lat) / 2],
-              zoom: 15.4,
-              pitch: 64,
-              bearing: angleDeg,
-              duration: baseDuration * 0.85
-            }});
-          }}
-
           function animate(now) {{
             if (!isPlaying) {{
               sprite.classList.remove('avatar-walking');
@@ -1282,19 +1181,17 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
             }}
             const t = Math.min(1, (now - startTime) / baseDuration);
             const smoothT = t * t * (3 - 2 * t);
-            const curLon = start.lon + (end.lon - start.lon) * smoothT;
-            const curLat = start.lat + (end.lat - start.lat) * smoothT;
+            currentLat = start.lat + (end.lat - start.lat) * smoothT;
+            currentLon = start.lon + (end.lon - start.lon) * smoothT;
 
-            travelerMarker.setLngLat([curLon, curLat]);
+            // 鏡頭平滑跟隨小人移動
+            map.panTo([currentLat, currentLon], {{ animate: false }});
+            syncTravelerScreenPosition();
 
-            const walkedCoords = places.slice(0, fromIdx + 1).map(p => [p.lon, p.lat]);
-            walkedCoords.push([curLon, curLat]);
-            if (map.getSource('route-walked')) {{
-              map.getSource('route-walked').setData({{
-                type: 'Feature',
-                geometry: {{ type: 'LineString', coordinates: walkedCoords }}
-              }});
-            }}
+            // 更新已走過的橘色路線
+            const walkedCoords = places.slice(0, fromIdx + 1).map(p => [p.lat, p.lon]);
+            walkedCoords.push([currentLat, currentLon]);
+            walkedPolyline.setLatLngs(walkedCoords);
 
             const dist = calcCumDist(fromIdx, smoothT);
             document.getElementById('hud-dist').innerText = `${{dist.toFixed(2)}} km`;
@@ -1309,16 +1206,13 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
             }} else {{
               sprite.classList.remove('avatar-walking');
               currentIndex = toIdx;
+              currentLat = end.lat;
+              currentLon = end.lon;
+              map.panTo([currentLat, currentLon], {{ animate: true, duration: 0.4 }});
+              syncTravelerScreenPosition();
               updateHudAtStop(currentIndex);
-              if (followCam) {{
-                map.easeTo({{
-                  center: [end.lon, end.lat],
-                  zoom: 16.0,
-                  pitch: 65,
-                  duration: 700
-                }});
-              }}
-              // 抵達新站點時，播報 AI 隨身語音導遊，播畢後繼續下一段
+
+              // 抵達新站點時，自動語音播報該站導覽詞，播畢後繼續前往下一站
               speakStopGuide(currentIndex, () => {{
                 if (isPlaying) onComplete();
               }});
@@ -1332,7 +1226,11 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           if (!isPlaying) return;
           if (currentIndex >= places.length - 1) {{
             currentIndex = 0;
-            travelerMarker.setLngLat([places[0].lon, places[0].lat]);
+            currentLat = places[0].lat;
+            currentLon = places[0].lon;
+            map.panTo([currentLat, currentLon], {{ animate: false }});
+            walkedPolyline.setLatLngs([[currentLat, currentLon]]);
+            syncTravelerScreenPosition();
             updateHudAtStop(0);
           }}
           walkSegment(currentIndex, currentIndex + 1, () => {{
@@ -1341,7 +1239,7 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
             }} else {{
               isPlaying = false;
               document.getElementById('btn-play').innerText = '🔄 重新漫遊';
-              document.getElementById('bubble-text').innerText = '🏁 全程巡禮完成！別忘了去集章卡打卡喔！';
+              document.getElementById('bubble-text').innerText = '🏁 全程巡禮完成！準備出發囉！';
             }}
           }});
         }}
@@ -1351,7 +1249,6 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           const btn = document.getElementById('btn-play');
           if (isPlaying) {{
             btn.innerText = '⏸️ 暫停漫遊';
-            // 若在起點剛開始，先播報第 1 站導覽再出發
             if (currentIndex === 0) {{
               speakStopGuide(0, () => {{
                 if (isPlaying) playLoop();
@@ -1375,16 +1272,13 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           document.getElementById('avatar-sprite').classList.remove('avatar-walking');
           currentIndex = idx;
           const p = places[idx];
-          travelerMarker.setLngLat([p.lon, p.lat]);
+          currentLat = p.lat;
+          currentLon = p.lon;
+          map.setView([currentLat, currentLon], 15, {{ animate: true }});
+          const walkedCoords = places.slice(0, idx + 1).map(pt => [pt.lat, pt.lon]);
+          walkedPolyline.setLatLngs(walkedCoords);
+          syncTravelerScreenPosition();
           updateHudAtStop(idx);
-          const walkedCoords = places.slice(0, idx + 1).map(pt => [pt.lon, pt.lat]);
-          if (map.getSource('route-walked')) {{
-            map.getSource('route-walked').setData({{
-              type: 'Feature',
-              geometry: {{ type: 'LineString', coordinates: walkedCoords }}
-            }});
-          }}
-          map.flyTo({{ center: [p.lon, p.lat], zoom: 16, pitch: 62, duration: 900 }});
         }}
 
         function stepPrev() {{
@@ -1399,14 +1293,16 @@ def render_3d_walking_map(enriched_places, checked_set, travel_mode="walking"):
           speakStopGuide(target, null);
         }}
 
-        function toggleCameraFollow() {{
-          followCam = !followCam;
-          document.getElementById('btn-cam').innerText = followCam ? '🎥 跟隨' : '🎥 自由';
-        }}
-
         function changeSpeed() {{
           speedMultiplier = parseFloat(document.getElementById('speed-sel').value || '2');
         }}
+
+        // 初始化定位與介面文字
+        setTimeout(() => {{
+          map.invalidateSize();
+          syncTravelerScreenPosition();
+          updateHudAtStop(0);
+        }}, 120);
       </script>
     </body>
     </html>
@@ -1437,8 +1333,6 @@ if start_button:
     if all_places:
       status_text.text("✅ 分析完成！")
       st.session_state["places"] = all_places
-      st.session_state["checked_places"] = set()
-      st.session_state["checkin_photos"] = {}
     else:
       status_text.text("⚠️ 未能萃取出景點，請檢查 API Key 或截圖清晰度。")
 
@@ -1500,16 +1394,11 @@ if "places" in st.session_state and st.session_state["places"]:
       pace_factor=pace_factor,
   )
 
-  # 計算目前集章進度
-  checked_set = st.session_state.get("checked_places", set())
   total_stops = len(enriched_places)
-  stamped_count = sum(
-      1 for p in enriched_places if p.get("name") in checked_set
-  )
 
-  # 頂部總覽儀表板 (5 張 KPI 卡片，新增集章進度)
+  # 頂部總覽儀表板 (4 張 KPI 卡片)
   boba_count = round(summary["calories"] / 450, 1)
-  k1, k2, k3, k4, k5 = st.columns(5)
+  k1, k2, k3, k4 = st.columns(4)
   with k1:
     st.markdown(
         f'<div class="stat-card"><div class="stat-val">📍 {total_stops} 站</div>'
@@ -1534,17 +1423,11 @@ if "places" in st.session_state and st.session_state["places"]:
         f'<div class="stat-label">預計消耗 {summary["calories"]} kcal</div></div>',
         unsafe_allow_html=True,
     )
-  with k5:
-    st.markdown(
-        f'<div class="stat-card"><div class="stat-val">💮 {stamped_count} / {total_stops} 枚</div>'
-        '<div class="stat-label">打卡集章解鎖進度</div></div>',
-        unsafe_allow_html=True,
-    )
 
   st.write("")
 
-  # 頂部動作列：Google Maps 導航 + 行事曆匯出 + 一鍵全集章展示
-  act_col1, act_col2, act_col3, act_col4 = st.columns([1.8, 1.1, 1.1, 1.1])
+  # 頂部動作列：Google Maps 導航 + 行事曆匯出 + 新增景點
+  act_col1, act_col2, act_col3 = st.columns([2, 1, 1])
   directions_url = generate_google_maps_directions_url(
       enriched_places, travel_mode=travel_mode
   )
@@ -1566,13 +1449,6 @@ if "places" in st.session_state and st.session_state["places"]:
         use_container_width=True,
     )
   with act_col3:
-    if st.button("💮 一鍵全蓋章 (Demo 展示)", use_container_width=True):
-      st.session_state["checked_places"] = {
-          p.get("name") for p in enriched_places
-      }
-      st.balloons()
-      st.rerun()
-  with act_col4:
     if st.button("➕ 手動新增自訂景點", use_container_width=True):
       st.session_state["show_add_modal"] = not st.session_state.get(
           "show_add_modal", False
@@ -1611,44 +1487,26 @@ if "places" in st.session_state and st.session_state["places"]:
             st.session_state["show_add_modal"] = False
             st.rerun()
 
-  col1, col2 = st.columns([1.08, 1.32])
+  col1, col2 = st.columns([1.05, 1.35])
 
-  # 左欄：智慧時間軸清單（含 AI 隨身語音導遊 & 單站打卡蓋章）
+  # 左欄：智慧時間軸清單（含 AI 隨身語音導遊）
   with col1:
     st.subheader(f"📋 順路時間軸 & 隨身語音導覽（共 {total_stops} 站）")
     cat_icons = {"美食": "🍜", "景點": "📸", "購物": "🛍️", "住宿": "🏨"}
 
     for i, p in enumerate(enriched_places, 1):
       p_name = p.get("name", f"第{i}站")
-      is_done = p_name in checked_set
 
       if i > 1:
         st.caption(
             f"⬇️ *移動約 {p['dist_from_prev_km']} km（預計 {p['move_mins_from_prev']} 分鐘）*"
         )
       with st.container(border=True):
-        c_title, c_stamp_btn, c_del = st.columns([4.2, 1.6, 0.7])
+        c_title, c_del = st.columns([5, 1])
         cat_icon = cat_icons.get(p.get("category", "景點"), "📍")
-        stamp_badge = " 💮`已蓋章`" if is_done else ""
         c_title.markdown(
-            f"#### `{p['arrive_time']} - {p['depart_time']}` 第 {i} 站：{p_name}{stamp_badge}"
+            f"#### `{p['arrive_time']} - {p['depart_time']}` 第 {i} 站：{p_name}"
         )
-
-        # 單站打卡蓋章切換按鈕
-        btn_label = "✅ 已打卡" if is_done else "💮 打卡蓋章"
-        if c_stamp_btn.button(
-            btn_label,
-            key=f"stamp_btn_{i}_{p_name}",
-            type="primary" if not is_done else "secondary",
-            use_container_width=True,
-        ):
-          if is_done:
-            st.session_state["checked_places"].discard(p_name)
-          else:
-            st.session_state["checked_places"].add(p_name)
-            if len(st.session_state["checked_places"]) == total_stops:
-              st.balloons()
-          st.rerun()
 
         if len(st.session_state["places"]) > 2:
           if c_del.button("🗑️", key=f"del_{i}", help="移除此站"):
@@ -1676,27 +1534,15 @@ if "places" in st.session_state and st.session_state["places"]:
         )
         render_single_tts_button(p["audio_script"], i, p_name)
 
-        # 展開上傳該站打卡認證照（選填，會自動合成進紀念海報）
-        with st.expander("📷 上傳本站踩點認證照 / 查看街景"):
-          photo_file = st.file_uploader(
-              f"上傳『{p_name}』踩點合照（將自動貼入集章紀念海報）",
-              type=["jpg", "jpeg", "png"],
-              key=f"photo_up_{i}_{p_name}",
-          )
-          if photo_file is not None:
-            st.session_state["checkin_photos"][p_name] = photo_file.getvalue()
-            st.session_state["checked_places"].add(p_name)
-            st.success("✅ 已儲存踩點照片並自動完成蓋章！")
-
-          search_text = f"{p_name} {p.get('city', '')}".strip()
-          single_map_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(search_text)}"
-          street_url = (
-              f"https://www.google.com/maps/@?api=1&map_action=pano"
-              f"&viewpoint={p.get('lat')},{p.get('lon')}"
-          )
-          st.markdown(
-              f"[🔍 Google Maps 店鋪資訊]({single_map_url}) ｜ [👀 開啟 360° 實景街景 (Street View)]({street_url})"
-          )
+        search_text = f"{p_name} {p.get('city', '')}".strip()
+        single_map_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(search_text)}"
+        street_url = (
+            f"https://www.google.com/maps/@?api=1&map_action=pano"
+            f"&viewpoint={p.get('lat')},{p.get('lon')}"
+        )
+        st.markdown(
+            f"[🔍 Google Maps 店鋪資訊]({single_map_url}) ｜ [👀 開啟 360° 實景街景 (Street View)]({street_url})"
+        )
 
     # 旅伴分享文案複製區
     with st.expander("📤 一鍵複製 Line / IG 旅伴分享文案"):
@@ -1712,97 +1558,15 @@ if "places" in st.session_state and st.session_state["places"]:
         share_lines.append(f"\n🗺️ 完整多點導航：{directions_url}")
       st.code("\n".join(share_lines), language="markdown")
 
-  # 右欄：3D 旅人語音漫遊、打卡進度集章卡、2D Folium 切換
+  # 右欄：3D 旅人語音漫遊 & 2D Folium 切換
   with col2:
-    tab_3d, tab_stamp, tab_2d = st.tabs([
-        "🕹️ 3D 旅人漫遊 + AI 語音導遊",
-        f"💮 打卡進度集章卡 ({stamped_count}/{total_stops})",
+    tab_3d, tab_2d = st.tabs([
+        "🕹️ 3D 旅人實景漫遊 + AI 語音導遊",
         "🗺️ 2D 經典路線圖 (Folium)",
     ])
 
     with tab_3d:
-      render_3d_walking_map(
-          enriched_places, checked_set=checked_set, travel_mode=travel_mode
-      )
-
-    with tab_stamp:
-      st.subheader("💮 旅遊踩點集章卡 (Stamp Rally)")
-      progress_ratio = stamped_count / total_stops if total_stops else 0.0
-      if progress_ratio == 0:
-        rank_title = "🌱 剛出發的初心旅人"
-      elif progress_ratio < 1.0:
-        rank_title = "🔥 順路探索冒險家"
-      else:
-        rank_title = "👑 全程完美制霸王！"
-
-      st.progress(
-          progress_ratio,
-          text=f"目前稱號：【{rank_title}】｜已收集 {stamped_count} / {total_stops} 枚紀念印章（{int(progress_ratio * 100)}%）",
-      )
-
-      # 渲染日本車站紀念章風格網格
-      stamp_cards_html = ['<div class="stamp-grid">']
-      for idx, p in enumerate(enriched_places, 1):
-        p_name = p.get("name", f"第{idx}站")
-        done = p_name in checked_set
-        slot_cls = "stamp-slot done" if done else "stamp-slot"
-        seal_cls = "stamp-seal unlocked" if done else "stamp-seal locked"
-        seal_inner = (
-            f"<div>第 {idx} 站</div><div style='font-size:15px;'>💮制霸</div><div>{p['arrive_time']}</div>"
-            if done
-            else f"<div>第 {idx} 站</div><div>待踩點</div>"
-        )
-        stamp_cards_html.append(
-            f'<div class="{slot_cls}">'
-            f'  <div class="{seal_cls}">{seal_inner}</div>'
-            f'  <div style="font-weight:700; font-size:13px; color:#0f172a;">{p_name}</div>'
-            f'  <div style="font-size:11.5px; color:#64748b; margin-top:2px;">{p.get("category", "景點")}</div>'
-            f"</div>"
-        )
-      stamp_cards_html.append("</div>")
-      st.markdown("".join(stamp_cards_html), unsafe_allow_html=True)
-
-      c_act1, c_act2 = st.columns(2)
-      with c_act1:
-        if st.button(
-            "🎉 一鍵蓋滿全部印章 (Demo 預覽)",
-            key="tab_stamp_all",
-            use_container_width=True,
-        ):
-          st.session_state["checked_places"] = {
-              p.get("name") for p in enriched_places
-          }
-          st.balloons()
-          st.rerun()
-      with c_act2:
-        if st.button(
-            "🔄 重置所有印章", key="tab_stamp_reset", use_container_width=True
-        ):
-          st.session_state["checked_places"] = set()
-          st.session_state["checkin_photos"] = {}
-          st.rerun()
-
-      st.markdown("---")
-      st.markdown("#### 🖼️ 即時合成「今日制霸集章紀念海報」")
-      st.caption(
-          "系統已根據您的順路行程、集章狀態與上傳的踩點照片，動態繪製專屬紀念海報："
-      )
-
-      poster_bytes = generate_stamp_poster_png(
-          enriched_places,
-          summary,
-          checked_set,
-          st.session_state.get("checkin_photos", {}),
-      )
-      st.download_button(
-          "📥 下載高畫質「今日制霸集章海報」(.png)",
-          data=poster_bytes,
-          file_name="stamp_rally_poster.png",
-          mime="image/png",
-          type="primary",
-          use_container_width=True,
-      )
-      st.image(poster_bytes, use_container_width=True)
+      render_3d_walking_map(enriched_places, travel_mode=travel_mode)
 
     with tab_2d:
       valid_coords = [
@@ -1816,7 +1580,6 @@ if "places" in st.session_state and st.session_state["places"]:
 
         for i, p in enumerate(enriched_places, 1):
           lat, lon = p.get("lat"), p.get("lon")
-          is_done = p.get("name") in checked_set
           if lat and lon:
             popup_content = (
                 f"<b>第 {i} 站 ({p['arrive_time']})：{p.get('name')}</b><br>"
@@ -1824,11 +1587,11 @@ if "places" in st.session_state and st.session_state["places"]:
             )
             folium.Marker(
                 location=[lat, lon],
-                tooltip=f"第 {i} 站：{p.get('name')} {'(💮已打卡)' if is_done else ''}",
+                tooltip=f"第 {i} 站：{p.get('name')}",
                 popup=folium.Popup(popup_content, max_width=250),
                 icon=folium.Icon(
-                    color="green" if is_done else ("red" if i == 1 else "blue"),
-                    icon="check" if is_done else ("flag" if i == 1 else "bookmark"),
+                    color="red" if i == 1 else "blue",
+                    icon="flag" if i == 1 else "bookmark",
                     prefix="fa",
                 ),
             ).add_to(m)
@@ -1849,5 +1612,5 @@ if "places" in st.session_state and st.session_state["places"]:
 else:
   st.info(
       "👈 **駭客松評審 Demo 秘訣**：直接點擊左側邊欄的 **「✨ 載入 Demo 行程（立即可玩 3D）」**，"
-      "免輸入 API Key、免上傳圖片即可體驗 **3D 旅人漫遊、AI 隨身語音導遊與打卡集章海報**！"
+      "免輸入 API Key、免上傳圖片即可體驗 **3D 旅人漫遊與 AI 隨身語音導遊**！"
   )
