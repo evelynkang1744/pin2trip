@@ -3,4 +3,3 @@ Pillow
 folium
 streamlit-folium
 geopy
-streamlit

@@ -4,7 +4,6 @@ import time
 from PIL import Image
 from google import genai
 from google.genai import types
-import streamlit as st
 
 # 改為以下安全寫法：
 api_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY"))
